@@ -319,22 +319,36 @@ class _Transfers:
 class _UserTags:
     def __init__ (self):
         self.cursor = _connection.cursor()
-        SQL  = 'select '
-        SQL += '  zcashflowtransactionentry.z_pk, '
-        SQL += '  ztag.zname '
-        SQL += '  from zcashflowtransactionentry '
-        SQL += '  join z_20usertags '
-        SQL += '    on z_20usertags.z_20cashflowtransactionentries = zcashflowtransactionentry.z_pk '
-        SQL += '  join ztag '
-        SQL += '    on ztag.z_pk = z_20usertags.z_79usertags '
-        u = self.cursor.execute (SQL)
         self.usertags = {}
-        for row in u:
-            if row['z_pk'] in self.usertags.keys():
-                self.usertags[row['z_pk']]['names'] += ',' + row['zname']
+        configs = [
+            {'tagRelationship': 'z_19usertags',
+             'tagTransaction': 'z_19cashflowtransactionentries',
+             'tagInstance': 'z_78usertags'},
+            {'tagRelationship': 'z_20usertags',
+             'tagTransaction':  'z_20cashflowtransactionentries',
+             'tagInstance':     'z_79usertags'},
+        ]
+        for i in configs:
+            SQL  = 'select '
+            SQL += '  zcashflowtransactionentry.z_pk, '
+            SQL += '  ztag.zname '
+            SQL += '  from zcashflowtransactionentry '
+            SQL +=f'  join {i['tagRelationship']} '
+            SQL +=f'    on {i['tagRelationship']}.{i['tagTransaction']} = zcashflowtransactionentry.z_pk '
+            SQL += '  join ztag '
+            SQL +=f'    on ztag.z_pk = {i['tagRelationship']}.{i['tagInstance']} '
+            try:
+                u = self.cursor.execute (SQL)
+            except sqlite3.OperationalError:
+                print('_UserTags not available. Data version is incompatible.')
             else:
-                self.usertags[row['z_pk']] = {'key':     row['z_pk'],
-                                              'names':   row['zname']}
+                for row in u:
+                    if row['z_pk'] in self.usertags.keys():
+                        self.usertags[row['z_pk']]['names'] += ',' + row['zname']
+                    else:
+                        self.usertags[row['z_pk']] = {'key': row['z_pk'],
+                                                      'names': row['zname']}
+                break
 
     def getUserTagNamesBySplitTransactionKey(self, key):
         if key in self.usertags:

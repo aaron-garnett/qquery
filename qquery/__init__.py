@@ -327,7 +327,11 @@ class _UserTags:
             {'tagRelationship': 'z_20usertags',
              'tagTransaction':  'z_20cashflowtransactionentries',
              'tagInstance':     'z_79usertags'},
+            {'tagRelationship': 'z_19usertags',
+             'tagTransaction': 'z_19cashflowtransactionentries',
+             'tagInstance': 'z_80usertags'},
         ]
+        success = False
         for i in configs:
             SQL  = 'select '
             SQL += '  zcashflowtransactionentry.z_pk, '
@@ -340,8 +344,10 @@ class _UserTags:
             try:
                 u = self.cursor.execute (SQL)
             except sqlite3.OperationalError:
-                print('_UserTags not available. Data version is incompatible.')
+                continue
             else:
+                success = True
+                print(f'Valid _UserTags config = {i['tagRelationship']}.{i['tagTransaction']},{i['tagInstance']}')
                 for row in u:
                     if row['z_pk'] in self.usertags.keys():
                         self.usertags[row['z_pk']]['names'] += ',' + row['zname']
@@ -349,6 +355,8 @@ class _UserTags:
                         self.usertags[row['z_pk']] = {'key': row['z_pk'],
                                                       'names': row['zname']}
                 break
+        if not success:
+            print('_UserTags not available. Data version is incompatible.')
 
     def getUserTagNamesBySplitTransactionKey(self, key):
         if key in self.usertags:

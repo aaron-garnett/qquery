@@ -120,6 +120,28 @@ def _formatQuickenDate (qtime):
                                      qgmtime.tm_mon,
                                      qgmtime.tm_mday)
 
+def _convertToQuickenDate (date_string):
+    """ Convert YYYY-MM-DD format to Quicken time. """
+    # Quicken's epoch is 2001,
+    # 31 years after the UNIX epoch 1970 (978307200 seconds).
+    struct_time = time.strptime(date_string, '%Y-%m-%d')
+    unix_time = time.mktime(struct_time)
+    quicken_time = int(unix_time - 978307200)
+    return quicken_time
+
+def _column_exists(table_name, column_name):
+    conn = None
+    try:
+        cursor = _connection.cursor()
+        cursor.execute(f"PRAGMA table_info('{table_name}');")
+        columns = cursor.fetchall()
+        for col_info in columns:
+            if col_info[1] == column_name:  # col_info[1] is the column name
+                return True
+        return False
+    except sqlite3.Error as e:
+        print(f"Error: {e}")
+        return False
 
 ##############################################################################
 
@@ -320,7 +342,10 @@ class _UserTags:
     def __init__ (self):
         self.cursor = _connection.cursor()
         self.usertags = {}
-        configs = [
+        known_configs = [
+            {'tagRelationship': 'z_15usertags',
+             'tagTransaction': 'z_15cashflowtransactionentries',
+             'tagInstance':    'z_76usertags'},
             {'tagRelationship': 'z_19usertags',
              'tagTransaction': 'z_19cashflowtransactionentries',
              'tagInstance': 'z_78usertags'},
@@ -331,23 +356,23 @@ class _UserTags:
              'tagTransaction': 'z_19cashflowtransactionentries',
              'tagInstance': 'z_80usertags'},
         ]
+        configs = known_configs + self._discover_configs(known_configs)
         success = False
         for i in configs:
             SQL  = 'select '
             SQL += '  zcashflowtransactionentry.z_pk, '
             SQL += '  ztag.zname '
             SQL += '  from zcashflowtransactionentry '
-            SQL +=f'  join {i['tagRelationship']} '
-            SQL +=f'    on {i['tagRelationship']}.{i['tagTransaction']} = zcashflowtransactionentry.z_pk '
+            SQL +=f'  join {i["tagRelationship"]} '
+            SQL +=f'    on {i["tagRelationship"]}.{i["tagTransaction"]} = zcashflowtransactionentry.z_pk '
             SQL += '  join ztag '
-            SQL +=f'    on ztag.z_pk = {i['tagRelationship']}.{i['tagInstance']} '
+            SQL +=f'    on ztag.z_pk = {i["tagRelationship"]}.{i["tagInstance"]} '
             try:
                 u = self.cursor.execute (SQL)
             except sqlite3.OperationalError:
                 continue
             else:
                 success = True
-                print(f'Valid _UserTags config = {i['tagRelationship']}.{i['tagTransaction']},{i['tagInstance']}')
                 for row in u:
                     if row['z_pk'] in self.usertags.keys():
                         self.usertags[row['z_pk']]['names'] += ',' + row['zname']
@@ -357,6 +382,35 @@ class _UserTags:
                 break
         if not success:
             print('_UserTags not available. Data version is incompatible.')
+
+    def _discover_configs (self, known_configs):
+        """Inspect the schema to find z_%usertags relationship tables not already in known_configs."""
+        known = {c['tagRelationship'] for c in known_configs}
+        discovered = []
+        try:
+            rows = self.cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND LOWER(name) LIKE 'z_%usertags'"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return discovered
+        for row in rows:
+            table_name = row[0].lower()
+            if table_name in known:
+                continue
+            try:
+                cols = [r[1].lower() for r in
+                        self.cursor.execute(f'PRAGMA table_info({table_name})').fetchall()]
+            except sqlite3.OperationalError:
+                continue
+            txn_cols = [c for c in cols if c.endswith('cashflowtransactionentries')]
+            tag_cols = [c for c in cols if c.endswith('usertags')]
+            if txn_cols and tag_cols:
+                discovered.append({
+                    'tagRelationship': table_name,
+                    'tagTransaction':  txn_cols[0],
+                    'tagInstance':     tag_cols[0],
+                })
+        return discovered
 
     def getUserTagNamesBySplitTransactionKey(self, key):
         if key in self.usertags:
@@ -378,6 +432,11 @@ class _Transactions:
         self.T = _Transfers ()
         self.U = _UserTags ()
         self.SQLconditional = ''
+        self.business = (
+            _column_exists('zcashflowtransactionentry', 'ZBUSINESS')
+            and _column_exists('zbusiness', 'ZNAME')
+            and _column_exists('zinvoicelineitem', 'ZAMOUNT')
+        )
 
         if _restrictToAccounts != None:
             if self.SQLconditional == '':
@@ -423,6 +482,22 @@ class _Transactions:
                 token = ' or '
             self.SQLconditional += ') '
 
+        if self.business:
+            self.SQLOptionalColumns  = '  zbusiness.zname as splitBusinessName, '
+            self.SQLOptionalColumns += '  zinvoicelineitem.zamount as splitClientPaymentAmount, '
+            self.SQLOptionalRelationship  =  '  left join zbusiness '
+            self.SQLOptionalRelationship +=  '    on zbusiness.z_pk = zcashflowtransactionentry.zbusiness '
+            self.SQLOptionalRelationship +=  '  left join zcustomerpayment '
+            self.SQLOptionalRelationship +=  '    on zcashflowtransactionentry.z_pk = zcustomerpayment.ztransactionentry '
+            self.SQLOptionalRelationship +=  '  left join zcustomerpaymentallocation '
+            self.SQLOptionalRelationship +=  '    on zcustomerpayment.z_pk = zcustomerpaymentallocation.zcustomerpayment '
+            self.SQLOptionalRelationship +=  '  left join zinvoice '
+            self.SQLOptionalRelationship +=  '    on zcustomerpaymentallocation.zinvoice = zinvoice.z_pk '
+            self.SQLOptionalRelationship +=  '  left join zinvoicelineitem '
+            self.SQLOptionalRelationship +=  '    on zinvoice.z_pk = zinvoicelineitem.zinvoice '
+        else:
+            self.SQLOptionalColumns = self.SQLOptionalRelationship = ''
+
     def __iter__ (self):
         self.cursor = _connection.cursor()
         # Not all of the following fields are used (yet).
@@ -444,6 +519,7 @@ class _Transactions:
         SQL += '  ztransaction.ztype                as parentTypeKey, '
         SQL += '  ztransaction.zcommission          as parentCommission, '
         SQL += '  ztransaction.zcostbasis           as parentCostBasis, '
+        SQL += self.SQLOptionalColumns
         SQL += '  zcashflowtransactionentry.zparent as splitParentKey, '
         SQL += '  zcashflowtransactionentry.zcategorytag  '
         SQL += '                                    as splitCategoryKey, '
@@ -465,6 +541,7 @@ class _Transactions:
         SQL += '    on zposition.z_pk = ztransaction.zposition '
         SQL += '  left join zsecurity '
         SQL += '    on zsecurity.z_pk = zposition.zsecurity '
+        SQL += self.SQLOptionalRelationship
         SQL += self.SQLconditional
         SQL += '       order by parentDate asc'
         self.cursor.execute (SQL)
@@ -502,7 +579,9 @@ class _Transactions:
                    'tags':              \
                               self.U.getUserTagNamesBySplitTransactionKey(trans['splitTransactionKey'])
                    }
-
+            if self.business:
+                row['business'] = trans['splitBusinessName']  # business name
+                if trans['splitClientPaymentAmount'] != None:  row['amount'] = trans['splitClientPaymentAmount']  # client payment amount
             if row['payeeKey']==None:  row['payeeKey']=''
             if row['payeeName']==None: row['payeeName']=''
             if row['parentNote']==None: row['parentNote']=''

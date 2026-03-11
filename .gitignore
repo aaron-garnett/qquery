@@ -6,3 +6,4 @@ TODO
 .DS_Store
 /qquery/tests/
 .idea
+build/
